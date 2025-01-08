@@ -3,7 +3,7 @@
 
 
 
-torchrun --nproc_per_node=2 src/hyper_search/optuna_office_fsdp.py \
+torchrun --nproc_per_node=1 src/hyper_search/optuna_office_fsdp.py \
              --data_path ./datas/train \
              --data_type train \
              --task_type 0 \

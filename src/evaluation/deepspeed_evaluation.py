@@ -7,7 +7,7 @@
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
-from torch.utils.data import DataLoader
+
 import torch
 import os
 
@@ -30,30 +30,30 @@ from src.evaluation.batch_evaluation import collate_fn
 import math
 from src.hyper_search.configs import FsdpEvaluationArgs
 import deepspeed
-from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-    Qwen2VLSdpaAttention,
-    VisionAttention,
-    VisionMlp,
-    Qwen2MLP,
-)
-
+from torch.utils.data import DataLoader
 class FsdpEvaluation:
     def __init__(self, fsdp_evaluation_args: FsdpEvaluationArgs):
         self.evaluation_args = fsdp_evaluation_args
-        self.set_up()
-        self.rank = dist.get_rank()
+        # self.set_up()
+        # self.rank = dist.get_rank()
 
-
-    def set_up(self):
+    def set_up(self,rank,world_size):
         torch.cuda.empty_cache()
         setup_environ_flags()
-        # torch.backends.cudnn.enabled = False
-        deepspeed.init_distributed(dist_backend='nccl')
+        torch.backends.cudnn.enabled = False
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12355'
+        
+        dist.init_process_group(backend="nccl",rank=rank,world_size=world_size)
+        torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
 
 
-    def evaluate_pretrain_model(self,world_size):
+    def evaluate_pretrain_model(self,rank,world_size):
         # copy optuna_helper.py
-        rank=dist.get_rank()
+        self.set_up(rank=rank,world_size=world_size)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
         if self.evaluation_args.low_cpu_fsdp:
             print(f"--> using Lora for low cpu fsdp and low rank...")
             print("Loading model...")
@@ -83,17 +83,6 @@ class FsdpEvaluation:
             data_type=self.evaluation_args.data_type,
             task_type=self.evaluation_args.task_type,
         )
-        # val_loader = get_dataloaders(
-        #     None,
-        #     val_dataset,
-        #     world_size=world_size,
-        #     local_rank=rank,
-        #     shuffle=self.evaluation_args.shuffle,
-        #     seed=self.evaluation_args.seed,
-        #     collator=collate_fn,
-        #     batch_size=self.evaluation_args.batch_size,
-        #     num_workers=self.evaluation_args.num_workers,
-        # )
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.evaluation_args.batch_size,
@@ -109,19 +98,10 @@ class FsdpEvaluation:
 
         print(f"--> initializing fsdp model...")
 
-        # Qwen2VLSdpaAttention,
-        # VisionAttention,
-        # VisionMlp,
-        # Qwen2MLP,
         
         model.eval()
-        model=deepspeed.init_inference(model, mp_size=world_size, dtype=torch.float32, replace_method='auto'\
-            ,replace_with_kernel_inject=True,max_tokens=2048)
-        for name, param in model.named_parameters():
-            print(f"Parameter {name} is on device: {param.device}")
-            # print(f"the size of parameter {name} is {param}")
-            
-        print(model)
+        model=deepspeed.init_inference(model, mp_size=world_size, dtype=torch.float32, replace_method='auto')
+
         pbar = tqdm(
             val_loader,
             total=len(val_loader),
@@ -129,7 +109,6 @@ class FsdpEvaluation:
             desc=f"evaluation epochs",
             disable=(rank != 0),
         )
-
 
         datas = {"predict": [], "id": [], "image_id": [], "origin_output": []}
         # datas = {
@@ -495,8 +474,8 @@ if __name__ == "__main__":
     if evaluation_args.sft:
         evaluater.evaluate_sft_model()
     else:
-        world_size = 2
-        evaluater.evaluate_pretrain_model(world_size)
+        world_size = torch.cuda.device_count()
+        mp.spawn(evaluater.evaluate_pretrain_model, args=(world_size,), nprocs=world_size)
 
 
 

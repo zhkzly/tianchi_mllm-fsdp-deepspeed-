@@ -99,8 +99,8 @@ class FsdpEvaluation:
                 torch_dtype=torch.float32,
                 device_map="cpu",
             )
-            # for param in model.parameters():
-            #     param.requires_grad = False
+            for param in model.parameters():
+                param.requires_grad = False
             param_init_fn = None
 
         if rank == 0:
@@ -142,24 +142,25 @@ class FsdpEvaluation:
 
             print(f"--> initializing fsdp model...")
 
-        model.train()
+        model.eval()
         model = FSDP(
             model,
-            # auto_wrap_policy=wrapping_policy,
-            # mixed_precision=mixed_precision_policy,
+            auto_wrap_policy=wrapping_policy,
+            mixed_precision=mixed_precision_policy,
             sharding_strategy=sharding_strategy_policy,
-            # # 必须和compile同时使用，否则会报错
+            # 必须和compile同时使用，否则会报错
             use_orig_params=self.evaluation_args.use_torch_compile,
             device_id=torch.cuda.current_device(),
-            # limit_all_gathers=True,
-            # param_init_fn=param_init_fn,
-            # sync_module_states=True,
+            limit_all_gathers=True,
+            param_init_fn=param_init_fn,
+            sync_module_states=True,
             
         )
-        if rank==0:
+
+        if rank == 1:
             for name, param in model.named_parameters():
                 print(f"Parameter {name} is on device: {param.device}")
-                print(f"the size of parameter {name} is {param.shape}")
+                print(f"the size of parameter {name} is {param}")
         # we need this post-fsdp call to avoid graph break with torch.compile, until we figure out a better solution.
         # model.rot_emb.compute_freqs_cis(
         #     torch.device("cuda", torch.cuda.current_device()),
@@ -181,7 +182,7 @@ class FsdpEvaluation:
             model = torch.compile(model)
 
         # profiler
-        # profiler = get_profiler(self.evaluation_args, rank)
+        profiler = get_profiler(self.evaluation_args, rank)
 
         pbar = tqdm(
             val_loader,
@@ -214,35 +215,33 @@ class FsdpEvaluation:
             )
             post_process_data = post_process_data.to(torch.cuda.current_device())
             # print(f"the data_ids:{image_ids}")
-            post_process_data = post_process_data.to(torch.cuda.current_device())
+            # post_process_data = post_process_data.to(torch.cuda.current_device())
             with torch.no_grad():
-                output=model(**post_process_data)
-                print(f"the output:{output}")
-                # output = model.generate(
-                #     **post_process_data,
-                #     max_new_tokens=128,
-                # )
-                # # print(f"the type of output:{type(output)}")
-                # generated_ids = [
-                #     output_ids[len(input_ids) :]
-                #     for input_ids, output_ids in zip(
-                #         post_process_data.input_ids, output
-                #     )
-                # ]
-                # # dist.gather(generated_ids, dst=0)
+                output = model.generate(
+                    **post_process_data,
+                    max_new_tokens=128,
+                )
+                # print(f"the type of output:{type(output)}")
+                generated_ids = [
+                    output_ids[len(input_ids) :]
+                    for input_ids, output_ids in zip(
+                        post_process_data.input_ids, output
+                    )
+                ]
+                # dist.gather(generated_ids, dst=0)
 
-                # output_text = processor.batch_decode(
-                #     generated_ids,
-                #     skip_special_tokens=True,
-                #     clean_up_tokenization_spaces=True,
-                # )
-                # if rank == 0:
-                #     datas["origin_output"] += output_text
-                #     datas["predict"] += [convert_to_json(text) for text in output_text]
-                #     datas["id"] += data_ids
-                # # datas["label"] += labels
-                # # [[],[]]
-                # datas["image_id"] += image_ids
+                output_text = processor.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True,
+                )
+                if rank == 0:
+                    datas["origin_output"] += output_text
+                    datas["predict"] += [convert_to_json(text) for text in output_text]
+                    datas["id"] += data_ids
+                # datas["label"] += labels
+                # [[],[]]
+                datas["image_id"] += image_ids
             if profiler is not None:
                 profiler.step()
         data_save_path = os.path.join(

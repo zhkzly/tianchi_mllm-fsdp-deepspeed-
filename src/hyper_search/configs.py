@@ -207,26 +207,26 @@ class FsdpEvaluationArgs:
     low_cpu_fsdp:bool = True
     fsdp_activation_checkpointing:bool = True
     selective_checkpointing:str = "1/3"
-    use_torch_compile:bool = False
+    use_torch_compile:bool = True
 
     tracker:str = "wandb"
     tracker_dir:str = "./logs/tracker"
     tracker_project_name:str = "mllm"
     
     model_name:str = "Qwen/Qwen2-VL-2B-Instruct"
-    cache_dir :str= "/gemini/pretrain/hub"
+    cache_dir :str= "./huggingface/hub"
     
-    data_path:str = "./datas/train"
+    data_path:str = "./datas/test"
     task_type:str = "all"
-    data_type:str = "train"
-    # shuffle 和 sampler 不能同时为真
-    shuffle:bool = True
+    data_type:str = "test"
+    
+    shuffle:bool = False
     seed:int = 567
     batch_size:int = 1
     num_workers:int = 2
     
 
-    use_profiler:bool = False
+    use_profiler:bool = True
     profile_traces:str = "./logs/profiler"
     
     use_lora:bool = False
@@ -242,4 +242,3 @@ class FsdpEvaluationArgs:
     profiler_rank0_only:bool = True
     
     sft:bool = False
-    local_rank:int=0
