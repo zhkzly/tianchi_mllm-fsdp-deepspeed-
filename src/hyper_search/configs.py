@@ -152,12 +152,16 @@ class TrainArgs:
     )
 
 
+
 # 采用 typing 中的，必须添加 List[int]
 @dataclass
 class ModelArgs:
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct"
     cache_dir :str= "./huggingface/hub"
-
+    device_map:str = field(
+        default="cpu",
+        metadata={"help": "the device map for fsdp"},
+    )
 
 @dataclass
 class OptunaArgs:
@@ -225,7 +229,7 @@ class FsdpEvaluationArgs:
     use_profiler:bool = True
     profile_traces:str = "./logs/profiler"
     
-    use_lora:bool = True
+    use_lora:bool = False
     low_rank:int = 8
     target_modules:List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
     peft_type:str = "lora"
@@ -237,4 +241,4 @@ class FsdpEvaluationArgs:
     load_file_name:str = "best.ckpt"
     profiler_rank0_only:bool = True
     
-    sft:bool = True
+    sft:bool = False

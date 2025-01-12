@@ -241,7 +241,7 @@ def get_model(model_args):
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_args.model_name,
         torch_dtype=torch.float32,
-        device_map="cpu",
+        device_map=model_args.device_map,
         cache_dir=model_args.cache_dir,
     )
     return model

@@ -1,3 +1,7 @@
+
+
+
+
 # 加载分片的模型参数，由于没有将封装的模型层进行重新命名，所以需要在fsdp 封装后进行加载
 # 是否可以完全完全是用meta device
 
@@ -25,8 +29,8 @@ from src.hyper_search.optuna_helper import Checkpointer
 from src.evaluation.batch_evaluation import collate_fn
 import math
 from src.hyper_search.configs import FsdpEvaluationArgs
-
-
+import deepspeed
+from torch.utils.data import DataLoader
 class FsdpEvaluation:
     def __init__(self, fsdp_evaluation_args: FsdpEvaluationArgs):
         self.evaluation_args = fsdp_evaluation_args
@@ -39,6 +43,7 @@ class FsdpEvaluation:
         torch.backends.cudnn.enabled = False
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '12355'
+        
         dist.init_process_group(backend="nccl",rank=rank,world_size=world_size)
         torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
 
@@ -48,51 +53,13 @@ class FsdpEvaluation:
         self.set_up(rank=rank,world_size=world_size)
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        local_rank = rank % torch.cuda.device_count()
-        # get policy
-        # 给哪个 module 进行封装，在这里采用尺寸进行判断，需要和训练的一致
-        # such as transformer_block
-        block = get_wrap_block(self.evaluation_args, rank)
-        (
-            mixed_precision_policy,
-            wrapping_policy,
-            sharding_strategy_policy,
-            apply_selective_ac,
-            param_init_fn,
-        ) = get_policies(self.evaluation_args, rank, block)
-
-        # get fms model
-        # llama_config = get_model_config(self.evaluation_args.model_name)
-        # if self.evaluation_args.low_cpu_fsdp:
-        #     if rank == 0:
-        #         print(f"--> using Lora for low cpu fsdp and low rank...")
-        #         if self.evaluation_args.use_lora:
-        #             if self.rank==0:
-        #                 print('Loading model...')
-        #                 print(f"the loading config of model is {self.evaluation_args.model_name}")
-        #                 model=Qwen2VLForConditionalGeneration.from_pretrained(self.evaluation_args.model_name,cache_dir=self.evaluation_args.cache_dir,
-        #                                                                     torch_dtype=torch.float32,device_map='cpu')
-        #                 for param in model.parameters():
-        #                     param.requires_grad = False
-        #                 param_init_fn=None
-        #     else:
-        #         with torch.device("meta"):
-        #             model=Qwen2VLForConditionalGeneration.from_pretrained(self.evaluation_args.model_name,cache_dir=self.evaluation_args.cache_dir,
-        #                                                                                     torch_dtype=torch.float32)
-        #             for param in model.parameters():
-        #                 param.requires_grad = False
-        #         def param_init_fn(module):
-        #             return module.to_empty(
-        #                 device=torch.cuda.current_device(), recurse=False
-        #             )
 
         if self.evaluation_args.low_cpu_fsdp:
-            if rank == 0:
-                print(f"--> using Lora for low cpu fsdp and low rank...")
-                print("Loading model...")
-                print(
-                    f"the loading config of model is {self.evaluation_args.model_name}"
-                )
+            print(f"--> using Lora for low cpu fsdp and low rank...")
+            print("Loading model...")
+            print(
+                f"the loading config of model is {self.evaluation_args.model_name}"
+            )
             model = Qwen2VLForConditionalGeneration.from_pretrained(
                 self.evaluation_args.model_name,
                 cache_dir=self.evaluation_args.cache_dir,
@@ -101,18 +68,12 @@ class FsdpEvaluation:
             )
             for param in model.parameters():
                 param.requires_grad = False
-            param_init_fn = None
-
-        if rank == 0:
-            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"\n--> model has {total_params / 1e6} Million params\n")
 
         # get data loader
-        if rank == 0:
-            print("Constructing datasets...")
-            print(f"--> using data_path: {self.evaluation_args.data_path}")
-            print(f"loading qwen2 processor...")
-            print("Datasets constructed!")
+        print("Constructing datasets...")
+        print(f"--> using data_path: {self.evaluation_args.data_path}")
+        print(f"loading qwen2 processor...")
+        print("Datasets constructed!")
         processor = AutoProcessor.from_pretrained(
             self.evaluation_args.model_name, cache_dir=self.evaluation_args.cache_dir
         )
@@ -122,67 +83,24 @@ class FsdpEvaluation:
             data_type=self.evaluation_args.data_type,
             task_type=self.evaluation_args.task_type,
         )
-        val_loader = get_dataloaders(
-            None,
+        val_loader = DataLoader(
             val_dataset,
-            world_size=world_size,
-            local_rank=rank,
-            shuffle=self.evaluation_args.shuffle,
-            seed=self.evaluation_args.seed,
-            collator=collate_fn,
             batch_size=self.evaluation_args.batch_size,
             num_workers=self.evaluation_args.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
         )
 
-        if rank == 0:
-            print("Datasets constructed!")
-            print("successfully constructed data loaders!")
+        print("Datasets constructed!")
+        print("successfully constructed data loaders!")
 
-            # FSDP,应该是在这里进行了模型参数的初始化，也就是放置到了实际的gpu上
+        # FSDP,应该是在这里进行了模型参数的初始化，也就是放置到了实际的gpu上
 
-            print(f"--> initializing fsdp model...")
+        print(f"--> initializing fsdp model...")
 
+        
         model.eval()
-        model = FSDP(
-            model,
-            auto_wrap_policy=wrapping_policy,
-            mixed_precision=mixed_precision_policy,
-            sharding_strategy=sharding_strategy_policy,
-            # 必须和compile同时使用，否则会报错
-            use_orig_params=self.evaluation_args.use_torch_compile,
-            device_id=torch.cuda.current_device(),
-            limit_all_gathers=True,
-            param_init_fn=param_init_fn,
-            sync_module_states=True,
-            
-        )
-
-        if rank == 1:
-            for name, param in model.named_parameters():
-                print(f"Parameter {name} is on device: {param.device}")
-                print(f"the size of parameter {name} is {param}")
-        # we need this post-fsdp call to avoid graph break with torch.compile, until we figure out a better solution.
-        # model.rot_emb.compute_freqs_cis(
-        #     torch.device("cuda", torch.cuda.current_device()),
-        #     model.config.max_expected_seq_len,
-        # )
-        dist.barrier()
-        # fsdp activation checkpointing
-        if self.evaluation_args.fsdp_activation_checkpointing:
-            if rank == 0:
-                print(f"--> applying FSDP activation checkpointing...")
-            apply_selective_ac(model, p=self.evaluation_args.selective_checkpointing)
-
-        # torch compile
-        if self.evaluation_args.use_torch_compile:
-            if rank == 0:
-                print(f"--> enabling torch compile...")
-            # the default accumulated_cache_size_limit=64 is not enough for 70b model, so we make it 128 here
-            torch._dynamo.config.accumulated_cache_size_limit = 128
-            model = torch.compile(model)
-
-        # profiler
-        profiler = get_profiler(self.evaluation_args, rank)
+        model=deepspeed.init_inference(model, mp_size=world_size, dtype=torch.float32, replace_method='auto')
 
         pbar = tqdm(
             val_loader,
@@ -191,17 +109,17 @@ class FsdpEvaluation:
             desc=f"evaluation epochs",
             disable=(rank != 0),
         )
-        if rank == 0:
-            datas = {"predict": [], "id": [], "image_id": [], "origin_output": []}
-            # datas = {
-            #     "predict": [],
-            #     "id": [],
-            #     "image_id": [],
-            #     "label": [],
-            #     "origin_output": [],
-            #     "label": [],
-            # }
-            print("starting the data process")
+
+        datas = {"predict": [], "id": [], "image_id": [], "origin_output": []}
+        # datas = {
+        #     "predict": [],
+        #     "id": [],
+        #     "image_id": [],
+        #     "label": [],
+        #     "origin_output": [],
+        #     "label": [],
+        # }
+        print("starting the data process")
         # generate_config={'return_'}
         for inputs_text, inputs_image, data_ids, image_ids in pbar:
             # for inputs_text, inputs_image, data_ids, image_ids, labels in pbar:
@@ -235,15 +153,14 @@ class FsdpEvaluation:
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                 )
-                if rank == 0:
-                    datas["origin_output"] += output_text
-                    datas["predict"] += [convert_to_json(text) for text in output_text]
-                    datas["id"] += data_ids
+
+                datas["origin_output"] += output_text
+                datas["predict"] += [convert_to_json(text) for text in output_text]
+                datas["id"] += data_ids
                 # datas["label"] += labels
                 # [[],[]]
                 datas["image_id"] += image_ids
-            if profiler is not None:
-                profiler.step()
+
         data_save_path = os.path.join(
             self.evaluation_args.data_path,
             f"task_{self.evaluation_args.task_type}_{self.evaluation_args.data_type}_pred_rank_{rank}.csv",
@@ -522,7 +439,7 @@ class FsdpEvaluation:
     def _resize_image(images, scale=2):
         return_images = []
         for image in images:
-            print(f"the type of image:{type(image)}")
+            # print(f"the type of image:{type(image)}")
             origin_w, origin_h = image.size
             if origin_w > 5000 or origin_h > 5000:
                 new_w, new_h = math.floor(origin_w / 10), math.floor(origin_h / 10)
@@ -559,5 +476,31 @@ if __name__ == "__main__":
     else:
         world_size = torch.cuda.device_count()
         mp.spawn(evaluater.evaluate_pretrain_model, args=(world_size,), nprocs=world_size)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

@@ -183,7 +183,7 @@ cython_debug/
 /logs/profiler/*
 !/logs/profiler/.gitkeep
 
-
+./thinking.md
 
 
 

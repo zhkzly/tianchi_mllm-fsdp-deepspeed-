@@ -16,8 +16,9 @@ import torch.distributed as dist
 from torch.distributed.fsdp import ShardingStrategy
 
 from src.utils.fms_fsdp.policies import *
-
+import wandb
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+import datetime
 MODEL_OUTPUT_CONFIG = {
     "use_cache": False,
     "return_dict": True,
@@ -31,7 +32,7 @@ def merge_dict(dict1, dict2):
     output = {**dict1, **dict2}
     return output
 
-
+from accelerate import Accelerator
 def train(
     train_args,
     model,
@@ -41,15 +42,12 @@ def train(
     optimizer,
     scheduler,
     profiler,
-    checkpointer,
-    train_sampler,
-    epoch,
     start_step=0,
     trial=None,
+    accelerator:Accelerator=None,
 ):
     # TODO:这个地方的记录应该是需要考虑在哪里声明
 
-    train_sampler.set_epoch(epoch)
     dist.barrier()
     model.train()
     ddp_stats = torch.zeros(3).to(local_rank)
@@ -58,13 +56,6 @@ def train(
     loop_start = time.time()
     train_loss = -1
     # 混合精度
-    if train_args.mixed_precision:
-        scaler = ShardedGradScaler()
-        autocast = torch.amp.autocast(
-            device_type="cuda", enabled=train_args.mixed_precision
-        )
-    else:
-        scaler = None
     optimizer.zero_grad()
     # 指定了一个开始的节点
     for batch_idx, (input, label) in enumerate(train_loader, start=start_step + 1):
@@ -76,41 +67,24 @@ def train(
         input = input.to(local_rank)
         label = label.to(local_rank)
         input_dict = merge_dict(MODEL_OUTPUT_CONFIG, input)
-        if train_args.mixed_precision:
-            with autocast:
-                output = model(labels=label, **input_dict)
-        else:
-            output = model(labels=label, **input_dict)
-
-        loss = (
-            output.loss / train_args.accumulation_steps
-            if hasattr(output, "loss")
-            else output
-        )
-
-        if train_args.mixed_precision:
-            scaler.scale(loss).backward()
-
-            if (batch_idx + 1) % train_args.accumulation_steps == 0:
-                if train_args.clip_grad_norm:
-                    ddp_stats[1] += model.clip_grad_norm_(
-                        train_args.grad_clip_thresh
-                    ).item()
-
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad()
-        else:
-            loss.backward()
-            if (batch_idx + 1) % train_args.accumulation_steps == 0:
-                if train_args.clip_grad_norm:
-                    ddp_stats[1] += model.clip_grad_norm_(train_args.grad_clip_thresh)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+        with accelerator.accumulate(model):            
+            with accelerator.autocast():
+                output= model(labels=label, **input_dict)
+            loss = (
+                output.loss
+                if hasattr(output, "loss")
+                else output
+            )
+            accelerator.backward(loss)
+            # 这里应该是有问题的
+            if accelerator.sync_gradients:
+                ddp_stats[1]+=accelerator.clip_grad_norm_(model.parameters(), train_args.max_grad_norm)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
 
         ddp_stats[0] += loss.item()
+        
         # TODO: 这里需要修改成为batch_size
         ddp_stats[2] += 1
 
@@ -119,7 +93,8 @@ def train(
 
         if batch_idx % train_args.report_interval == 0:
             # 等价与 all_gather+ reduceOp.SUM,all_gather,是得到所有的结果，
-            dist.all_reduce(ddp_stats, op=dist.ReduceOp.SUM)
+            # dist.all_reduce(ddp_stats, op=dist.ReduceOp.SUM)
+            accelerator.reduce(ddp_stats,reduction='sum')
             train_loss = train_args.accumulation_steps * ddp_stats[0] / ddp_stats[2]
             g_norm = ddp_stats[1] / ddp_stats[2]
             elapsed_time = time.time() - loop_start
@@ -162,16 +137,14 @@ def train(
         torch.cuda.reset_peak_memory_stats(device=torch.cuda.current_device())
 
         if (batch_idx + 1) % train_args.checkpoint_interval == 0:
-            checkpointer.save(
-                model=model,
-                optimizer=optimizer,
-                step=trial.number,
-            )
-
+            nowtime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            model_state=accelerator.get_state_dict(model)
+            model_save_path=os.path.join(train_args,nowtime+str(trial.number)+f'{batch_idx}.pth')
+            accelerator.save(model_state,f=model_save_path)
     return vals_to_track
 
 
-def validate_fn(model, val_loader, epoch, train_args, rank, local_rank, tracker_fn):
+def validate_fn(model, val_loader, epoch, train_args, rank, local_rank, tracker_fn,accelerator:Accelerator=None):
     if rank == 0:
         print(f"Validating at epoch {epoch}...")
     autocast = torch.amp.autocast(
@@ -190,12 +163,11 @@ def validate_fn(model, val_loader, epoch, train_args, rank, local_rank, tracker_
             val_loss = val_output.loss if hasattr(val_output, "loss") else val_output
             val_stats[0] += val_loss.item()
             val_stats[1] += val_input.shape[0]
-        dist.reduce(val_stats, dst=0, op=dist.ReduceOp.SUM)
+        accelerator.reduce(val_stats)
         if rank == 0:
             mean_val_loss = val_stats[0] / val_stats[1]
             print(f"Validation loss at epoch {epoch}: {val_loss.item()}")
             if train_args.tracker:
-
                 tracker_fn({"mean_validation loss": mean_val_loss.item()}, step=epoch)
 
         return mean_val_loss.item()

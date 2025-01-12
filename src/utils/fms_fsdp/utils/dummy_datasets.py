@@ -198,7 +198,38 @@ class CustomSftDataset(Dataset):
 # def collate_fn(batch:List[List[Dict]]):
 #     # helping organize the return of the dataset call
 #     # 需要进行批量化的padding，得到一些掩码，和ignore,构造完整的 sft instruction
+import math
 
+def resize_image(images,scale=3):
+    tempt_images=[]
+    if isinstance(images,list):
+        if isinstance(images[0],list):
+            for image_list in images:
+                for image in image_list:
+                    tempt_images.append(image)
+    return_images=[]
+    for image in tempt_images:
+        origin_w, origin_h = image.size
+        if origin_w > 5000 or origin_h >5000:
+            new_w, new_h = math.floor(origin_w / 25), math.floor(origin_h / 25)
+        elif origin_w > 4000 or origin_h >4000:
+            new_w, new_h = math.floor(origin_w / 20), math.floor(origin_h / 20)
+        elif origin_w > 3000 or origin_h >3000:
+            new_w, new_h = math.floor(origin_w / 18), math.floor(origin_h / 18)
+        elif origin_w > 2000 or origin_h >2000:
+            new_w, new_h = math.floor(origin_w / 15), math.floor(origin_h / 15)
+        elif origin_w > 1000 or origin_h >1000:
+            new_w, new_h = math.floor(origin_w / 10), math.floor(origin_h / 10)
+        elif origin_w > 500 or origin_h >500:
+            new_w, new_h = math.floor(origin_w / 8), math.floor(origin_h / 8)
+        else:
+            new_w, new_h = math.floor(origin_w / scale), math.floor(origin_h / scale)
+        # logger.debug(f"the origin_w,origin_h:{origin_w,origin_h}")
+        
+        image = image.resize((new_w, new_h))
+        # logger.debug(f"the new_w,new_h:{new_w,new_h}")
+        return_images.append(image)
+    return return_images
 
 class DataSftCollator:
     def __init__(self, preprocessor):
@@ -246,6 +277,7 @@ class DataSftCollator:
         # 将 response和instruction进行拼接获取一个完整的text list,获取一个完整的image list
         #  之后进行preprocessor ，得到模型的输入
         full_prompts = self._get_full_prompts(instances)
+        full_prompts=[prompt[:20] for prompt in full_prompts]
         images = [instance["image"] for instance in instances]
         inputs_features_dict = self.preprocessor(
             text=full_prompts,

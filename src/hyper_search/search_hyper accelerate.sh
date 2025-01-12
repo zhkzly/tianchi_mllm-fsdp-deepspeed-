@@ -3,7 +3,7 @@
 
 
 
-torchrun --nproc_per_node=1 src/hyper_search/optuna_office_fsdp.py \
+accelerate launch --config_file ./defaul_config.yaml  src/hyper_search/optuna_office_fsdp.py \
              --data_path ./datas/train \
              --data_type train \
              --task_type 0 \
@@ -53,7 +53,7 @@ torchrun --nproc_per_node=1 src/hyper_search/optuna_office_fsdp.py \
              --ckpt_save_path ./checkpoints/ \
              --finetune True \
              --gradient_accumulation_steps 1 \
-             --report_interval 100 \
+             --report_interval 1000 \
              --checkpoint_interval 1000 \
              --save_only_rank0 False    \
              --device_map cpu

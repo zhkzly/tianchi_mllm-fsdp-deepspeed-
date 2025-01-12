@@ -1,6 +1,6 @@
 
-torchrun --nproc_per_node=2 ./src/evaluation/fsdp_evaluation.py \
-    --data_path ./datas/train \
+deepspeed --num_gpus=2 ./src/evaluation/deepspeed_evaluation.py \
+    --data_path ../datas/test1 \
     --task_type all \
     --data_type test \
     --model_name Qwen/Qwen2-VL-2B-Instruct \
